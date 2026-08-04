@@ -8,9 +8,128 @@ import (
 	"io"
 	"strings"
 
+	"github.com/kubescape/go-logger"
 	"github.com/mikefarah/yq/v4/pkg/yqlib"
 	"gopkg.in/yaml.v3"
 )
+
+type resourceIdentity struct {
+	apiVersion string
+	kind       string
+	name       string
+	namespace  string
+}
+
+func (r resourceIdentity) key() string {
+	return fmt.Sprintf("%s|%s|%s|%s", r.apiVersion, r.kind, r.namespace, r.name)
+}
+
+func (r resourceIdentity) String() string {
+	return fmt.Sprintf("apiVersion: %q, kind: %q, name: %q, namespace: %q", r.apiVersion, r.kind, r.name, r.namespace)
+}
+
+func (r resourceIdentity) isEmpty() bool {
+	return r.apiVersion == "" && r.kind == "" && r.name == ""
+}
+
+func (r resourceIdentity) matches(other resourceIdentity) bool {
+	if r.isEmpty() || other.isEmpty() {
+		return false
+	}
+	if r.kind != other.kind || r.name != other.name {
+		return false
+	}
+	if r.namespace != "" && other.namespace != "" && r.namespace != other.namespace {
+		return false
+	}
+	if r.apiVersion != "" && other.apiVersion != "" && r.apiVersion != other.apiVersion {
+		return false
+	}
+	return true
+}
+
+func extractResourceIdentity(node *yaml.Node) resourceIdentity {
+	if node == nil {
+		return resourceIdentity{}
+	}
+	root := node
+	if root.Kind == yaml.DocumentNode {
+		if len(root.Content) == 0 {
+			return resourceIdentity{}
+		}
+		root = root.Content[0]
+	}
+	if root.Kind != yaml.MappingNode {
+		return resourceIdentity{}
+	}
+
+	var res resourceIdentity
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		keyNode := root.Content[i]
+		valNode := root.Content[i+1]
+		if keyNode.Kind != yaml.ScalarNode {
+			continue
+		}
+		switch keyNode.Value {
+		case "apiVersion":
+			if valNode.Kind == yaml.ScalarNode {
+				res.apiVersion = valNode.Value
+			}
+		case "kind":
+			if valNode.Kind == yaml.ScalarNode {
+				res.kind = valNode.Value
+			}
+		case "metadata":
+			if valNode.Kind == yaml.MappingNode {
+				for j := 0; j+1 < len(valNode.Content); j += 2 {
+					mKey := valNode.Content[j]
+					mVal := valNode.Content[j+1]
+					if mKey.Kind == yaml.ScalarNode && mVal.Kind == yaml.ScalarNode {
+						if mKey.Value == "name" {
+							res.name = mVal.Value
+						} else if mKey.Value == "namespace" {
+							res.namespace = mVal.Value
+						}
+					}
+				}
+			}
+		}
+	}
+	return res
+}
+
+func isEmptyOrCommentOnlyDocument(node *yaml.Node) bool {
+	if node == nil {
+		return true
+	}
+	if node.Kind == yaml.DocumentNode {
+		if len(node.Content) == 0 {
+			return true
+		}
+		for _, child := range node.Content {
+			if !isEmptyOrCommentOnlyNode(child) {
+				return false
+			}
+		}
+		return true
+	}
+	return isEmptyOrCommentOnlyNode(node)
+}
+
+func isEmptyOrCommentOnlyNode(node *yaml.Node) bool {
+	if node == nil {
+		return true
+	}
+	if node.Kind == yaml.MappingNode && len(node.Content) == 0 {
+		return true
+	}
+	if node.Kind == yaml.ScalarNode {
+		if node.Tag == "!!null" || strings.TrimSpace(node.Value) == "" || node.Value == "null" || node.Value == "{}" {
+			return true
+		}
+	}
+	return false
+}
 
 // decodeDocumentRoots decodes all YAML documents stored in a given `filepath` and returns a slice of their root nodes
 func decodeDocumentRoots(yamlAsString string) ([]yaml.Node, error) {
@@ -36,6 +155,44 @@ func decodeDocumentRoots(yamlAsString string) ([]yaml.Node, error) {
 	return nodes, nil
 }
 
+func isSameNodeDeep(nodeOne, nodeTwo *yaml.Node) bool {
+	if nodeOne == nil || nodeTwo == nil {
+		return nodeOne == nodeTwo
+	}
+	if nodeOne.Kind != nodeTwo.Kind || nodeOne.Value != nodeTwo.Value {
+		return false
+	}
+	if len(nodeOne.Content) != len(nodeTwo.Content) {
+		return false
+	}
+	for i := range nodeOne.Content {
+		if !isSameNodeDeep(nodeOne.Content[i], nodeTwo.Content[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func hasAnyNodeChanged(origDocs, fixedDocs *list.List) bool {
+	if origDocs == nil || fixedDocs == nil || origDocs.Len() != fixedDocs.Len() {
+		return true
+	}
+	origElem := origDocs.Front()
+	fixedElem := fixedDocs.Front()
+	for origElem != nil && fixedElem != nil {
+		origCand, ok1 := origElem.Value.(*yqlib.CandidateNode)
+		fixedCand, ok2 := fixedElem.Value.(*yqlib.CandidateNode)
+		if ok1 && ok2 && origCand.Node != nil && fixedCand.Node != nil {
+			if !isSameNodeDeep(origCand.Node, fixedCand.Node) {
+				return true
+			}
+		}
+		origElem = origElem.Next()
+		fixedElem = fixedElem.Next()
+	}
+	return false
+}
+
 func getFixedNodes(ctx context.Context, yamlAsString, yamlExpression string) ([]yaml.Node, error) {
 	preferences := yqlib.ConfiguredYamlPreferences
 	preferences.EvaluateTogether = true
@@ -48,7 +205,12 @@ func getFixedNodes(ctx context.Context, yamlAsString, yamlExpression string) ([]
 	if err != nil {
 		return nil, err
 	}
-	allDocuments.PushBackList(fileDocuments)
+	for elem := fileDocuments.Front(); elem != nil; elem = elem.Next() {
+		cand, ok := elem.Value.(*yqlib.CandidateNode)
+		if ok && cand.Node != nil && !isEmptyOrCommentOnlyDocument(cand.Node) {
+			allDocuments.PushBack(cand)
+		}
+	}
 
 	allAtOnceEvaluator := yqlib.NewAllAtOnceEvaluator()
 
@@ -56,6 +218,26 @@ func getFixedNodes(ctx context.Context, yamlAsString, yamlExpression string) ([]
 
 	if err != nil {
 		return nil, fmt.Errorf("error fixing YAML, %w", err)
+	}
+
+	if strings.HasPrefix(yamlExpression, "select(di==") && !hasAnyNodeChanged(allDocuments, fixedCandidateNodes) {
+		if idx := strings.Index(yamlExpression, ")."); idx != -1 {
+			fallbackExpr := yamlExpression[idx+1:]
+			freshReader := strings.NewReader(yamlAsString)
+			freshDecoder := yqlib.NewYamlDecoder(preferences)
+			if freshFileDocs, err := readDocuments(ctx, freshReader, freshDecoder); err == nil {
+				freshAllDocs := list.New()
+				for elem := freshFileDocs.Front(); elem != nil; elem = elem.Next() {
+					cand, ok := elem.Value.(*yqlib.CandidateNode)
+					if ok && cand.Node != nil && !isEmptyOrCommentOnlyDocument(cand.Node) {
+						freshAllDocs.PushBack(cand)
+					}
+				}
+				if fallbackNodes, err := allAtOnceEvaluator.EvaluateCandidateNodes(fallbackExpr, freshAllDocs); err == nil && hasAnyNodeChanged(allDocuments, fallbackNodes) {
+					fixedCandidateNodes = fallbackNodes
+				}
+			}
+		}
 	}
 
 	fixedNodes := make([]yaml.Node, 0)
@@ -91,14 +273,69 @@ func getFixInfo(ctx context.Context, originalRootNodes, fixedRootNodes []yaml.No
 	contentToAdd := make([]contentToAdd, 0)
 	linesToRemove := make([]linesToRemove, 0)
 
-	for idx := range fixedRootNodes {
-		// The two decoders can disagree on document count (e.g. an empty leading
-		// document), so guard the paired index instead of panicking.
-		if idx >= len(originalRootNodes) {
-			break
+	type originalDocEntry struct {
+		index    int
+		node     *yaml.Node
+		identity resourceIdentity
+		matched  bool
+	}
+
+	origDocs := make([]*originalDocEntry, 0, len(originalRootNodes))
+	for i := range originalRootNodes {
+		node := &originalRootNodes[i]
+		if isEmptyOrCommentOnlyDocument(node) {
+			continue
 		}
-		originalList := flattenWithDFS(&originalRootNodes[idx])
-		fixedList := flattenWithDFS(&fixedRootNodes[idx])
+		identity := extractResourceIdentity(node)
+		origDocs = append(origDocs, &originalDocEntry{
+			index:    i,
+			node:     node,
+			identity: identity,
+			matched:  false,
+		})
+	}
+
+	for fIdx := range fixedRootNodes {
+		fixedNode := &fixedRootNodes[fIdx]
+		if isEmptyOrCommentOnlyDocument(fixedNode) {
+			continue
+		}
+		fixedIdentity := extractResourceIdentity(fixedNode)
+
+		var matchedOrig *originalDocEntry
+
+		// 1. Try matching by resource identity (if non-empty)
+		if !fixedIdentity.isEmpty() {
+			for _, orig := range origDocs {
+				if !orig.matched && orig.identity.matches(fixedIdentity) {
+					matchedOrig = orig
+					break
+				}
+			}
+		}
+
+		// 2. Fallback: match first available unmatched original doc if identity matching didn't yield a match
+		if matchedOrig == nil {
+			for _, orig := range origDocs {
+				if !orig.matched {
+					if !fixedIdentity.isEmpty() {
+						logger.L().Ctx(ctx).Warning(fmt.Sprintf("Could not determine matching original resource by identity for fixed node (%s); falling back to positional alignment", fixedIdentity.String()))
+					}
+					matchedOrig = orig
+					break
+				}
+			}
+		}
+
+		if matchedOrig == nil {
+			logger.L().Ctx(ctx).Warning(fmt.Sprintf("Could not determine matching original resource for fixed node (%s) at fixed index %d", fixedIdentity.String(), fIdx))
+			continue
+		}
+
+		matchedOrig.matched = true
+
+		originalList := flattenWithDFS(matchedOrig.node)
+		fixedList := flattenWithDFS(fixedNode)
 		nodeContentToAdd, nodeLinesToRemove, err := getFixInfoHelper(ctx, *originalList, *fixedList)
 		if err != nil {
 			return fileFixInfo{}, err

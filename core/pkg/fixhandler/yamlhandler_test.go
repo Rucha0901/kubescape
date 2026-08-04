@@ -196,3 +196,92 @@ func TestGetFixedNodes(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractResourceIdentity(t *testing.T) {
+	input := `
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-dep
+  namespace: test-ns
+`
+	nodes, err := decodeDocumentRoots(input)
+	require.NoError(t, err)
+	require.Len(t, nodes, 1)
+
+	identity := extractResourceIdentity(&nodes[0])
+	assert.Equal(t, "apps/v1", identity.apiVersion)
+	assert.Equal(t, "Deployment", identity.kind)
+	assert.Equal(t, "my-dep", identity.name)
+	assert.Equal(t, "test-ns", identity.namespace)
+	assert.False(t, identity.isEmpty())
+	assert.Equal(t, "apps/v1|Deployment|test-ns|my-dep", identity.key())
+}
+
+func TestIsEmptyOrCommentOnlyDocument(t *testing.T) {
+	input := `
+---
+# Just a comment
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: test-pod
+`
+	nodes, err := decodeDocumentRoots(input)
+	require.NoError(t, err)
+	require.Len(t, nodes, 2)
+
+	assert.True(t, isEmptyOrCommentOnlyDocument(&nodes[0]))
+	assert.False(t, isEmptyOrCommentOnlyDocument(&nodes[1]))
+}
+
+func TestApplyFixToContent_MultiDocumentAlignment(t *testing.T) {
+	multiDocYaml := `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cm-doc
+data:
+  key: val
+---
+# Commented-out document
+# apiVersion: v1
+# kind: ConfigMap
+# metadata:
+#   name: commented-cm
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: web-pod
+spec:
+  containers:
+  - name: nginx
+    image: nginx:1.14.2
+---
+# Empty document separator
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-service
+spec:
+  ports:
+  - port: 80
+`
+
+	// Expression fixes the Pod image and adds namespace to Service using yq with(select(...); ...) syntax
+	expression := `with(select(.kind == "Pod"); .spec.containers[0].image |= "nginx:1.27") | with(select(.kind == "Service"); .metadata.namespace |= "prod")`
+
+	fixedYaml, err := ApplyFixToContent(context.Background(), multiDocYaml, expression)
+	require.NoError(t, err)
+
+	// Verify that comments, empty separator, and documents remain intact
+	assert.Contains(t, fixedYaml, "# Commented-out document")
+	assert.Contains(t, fixedYaml, "# Empty document separator")
+	assert.Contains(t, fixedYaml, "image: nginx:1.27")
+	assert.Contains(t, fixedYaml, "namespace: prod")
+	assert.Contains(t, fixedYaml, "name: web-service")
+}
+
+

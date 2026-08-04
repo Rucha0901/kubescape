@@ -63,22 +63,45 @@ func adjustContentLines(contentToAdd *[]contentToAdd, linesSlice *[]string) {
 	}
 }
 
-func adjustFixedListLines(originalList, fixedList *[]nodeInfo) {
+func getFirstLine(nodeList *[]nodeInfo) int {
+	if nodeList == nil {
+		return 0
+	}
+	for _, n := range *nodeList {
+		if n.node != nil && n.node.Kind != yaml.DocumentNode && n.node.Line > 0 {
+			return n.node.Line
+		}
+	}
+	return 0
+}
 
+func adjustFixedListLines(originalList, fixedList *[]nodeInfo) {
 	if originalList == nil || fixedList == nil || len(*originalList) == 0 || len(*fixedList) == 0 {
 		return // Check for empty slices to avoid index out of range errors
 	}
 
-	differenceAtTop := (*originalList)[0].node.Line - (*fixedList)[0].node.Line
+	if (*originalList)[0].node.Kind == yaml.DocumentNode && (*fixedList)[0].node.Kind == yaml.DocumentNode {
+		(*fixedList)[0].node.Line = (*originalList)[0].node.Line
+		(*fixedList)[0].node.Column = (*originalList)[0].node.Column
+	}
 
-	if differenceAtTop <= 0 {
+	origLine := getFirstLine(originalList)
+	fixedLine := getFirstLine(fixedList)
+
+	if origLine <= 0 || fixedLine <= 0 {
 		return
 	}
 
-	for _, node := range *fixedList {
+	differenceAtTop := origLine - fixedLine
+
+	if differenceAtTop == 0 {
+		return
+	}
+
+	for idx := 1; idx < len(*fixedList); idx++ {
 		// line numbers should not be changed for new nodes.
-		if node.node.Line != 0 {
-			node.node.Line += differenceAtTop
+		if (*fixedList)[idx].node.Line != 0 {
+			(*fixedList)[idx].node.Line += differenceAtTop
 		}
 	}
 }
@@ -94,14 +117,21 @@ func enocodeIntoYaml(parentNode *yaml.Node, nodeList *[]nodeInfo, tracker int) (
 	content = append(content, currentNode)
 
 	// Add the value in "key-value" pair to construct if the parent is mapping node
-	if parentNode.Kind == yaml.MappingNode {
-		valueNode := (*nodeList)[tracker+1].node
-		content = append(content, valueNode)
+	if parentNode != nil && parentNode.Kind == yaml.MappingNode {
+		if tracker+1 < len(*nodeList) {
+			valueNode := (*nodeList)[tracker+1].node
+			content = append(content, valueNode)
+		}
+	}
+
+	kind := yaml.MappingNode
+	if parentNode != nil {
+		kind = parentNode.Kind
 	}
 
 	// The parent is added at the top to encode into YAML
 	parentForContent := yaml.Node{
-		Kind:    parentNode.Kind,
+		Kind:    kind,
 		Content: content,
 	}
 
@@ -110,7 +140,7 @@ func enocodeIntoYaml(parentNode *yaml.Node, nodeList *[]nodeInfo, tracker int) (
 	encoder := yaml.NewEncoder(buf)
 	encoder.SetIndent(2)
 
-	errorEncoding := encoder.Encode(parentForContent)
+	errorEncoding := encoder.Encode(&parentForContent)
 	if errorEncoding != nil {
 		return "", fmt.Errorf("error debugging node, %v", errorEncoding.Error())
 	}
@@ -129,7 +159,10 @@ func getContent(ctx context.Context, parentNode *yaml.Node, nodeList *[]nodeInfo
 		return "", fmt.Errorf("cannot encode fix into YAML: %w", err)
 	}
 
-	indentationSpaces := parentNode.Column - 1
+	indentationSpaces := 0
+	if parentNode != nil {
+		indentationSpaces = parentNode.Column - 1
+	}
 
 	content = indentContent(content, indentationSpaces)
 
@@ -231,6 +264,9 @@ func getNodeLine(nodeList *[]nodeInfo, tracker int) int {
 
 // Checks if the node is value node in "key-value" pairs of mapping node
 func isValueNodeinMapping(node *nodeInfo) bool {
+	if node == nil || node.parent == nil {
+		return false
+	}
 	if node.parent.Kind == yaml.MappingNode && node.index%2 != 0 {
 		return true
 	}
@@ -239,16 +275,22 @@ func isValueNodeinMapping(node *nodeInfo) bool {
 
 // Checks if the node is part of single line sequence node and returns the line
 func isOneLineSequenceNode(list *[]nodeInfo, currentTracker int) (bool, int) {
+	if list == nil || currentTracker < 0 || currentTracker >= len(*list) {
+		return false, -1
+	}
 	parentNode := (*list)[currentTracker].parent
-	if parentNode.Kind != yaml.SequenceNode {
+	if parentNode == nil || parentNode.Kind != yaml.SequenceNode {
 		return false, -1
 	}
 
 	var currentNode, prevNode nodeInfo
 	currentTracker -= 1
 
-	for (*list)[currentTracker].node != parentNode {
+	for currentTracker >= 0 && (*list)[currentTracker].node != parentNode {
 		currentNode = (*list)[currentTracker]
+		if currentTracker-1 < 0 {
+			return false, -1
+		}
 		prevNode = (*list)[currentTracker-1]
 
 		if currentNode.node.Line != prevNode.node.Line {
@@ -256,10 +298,20 @@ func isOneLineSequenceNode(list *[]nodeInfo, currentTracker int) (bool, int) {
 		}
 		currentTracker -= 1
 	}
+	if currentTracker < 0 {
+		return false, -1
+	}
 
 	parentNodeInfo := (*list)[currentTracker]
 
+	if parentNodeInfo.parent == nil {
+		return false, -1
+	}
+
 	if parentNodeInfo.parent.Kind == yaml.MappingNode {
+		if currentTracker-1 < 0 {
+			return false, -1
+		}
 		keyNodeInfo := (*list)[currentTracker-1]
 		if keyNodeInfo.node.Line == parentNode.Line {
 			return true, parentNode.Line
@@ -420,17 +472,19 @@ func getChildrenCount(node *yaml.Node) int {
 // The current node along with it's children is skipped and the tracker is moved to next sibling
 // of current node. If parent is mapping node, "value" in "key-value" pairs is also skipped.
 func updateTracker(nodeList *[]nodeInfo, tracker int) int {
+	if nodeList == nil || tracker < 0 || tracker >= len(*nodeList) {
+		return tracker
+	}
 	currentNode := (*nodeList)[tracker]
-	var updatedTracker int
 
-	if currentNode.parent.Kind == yaml.MappingNode {
-		valueNode := (*nodeList)[tracker+1]
-		updatedTracker = skipCurrentNode(valueNode.node, tracker+1)
-	} else {
-		updatedTracker = skipCurrentNode(currentNode.node, tracker)
+	if currentNode.parent != nil && currentNode.parent.Kind == yaml.MappingNode {
+		if !isValueNodeinMapping(&currentNode) && tracker+1 < len(*nodeList) {
+			valueNode := (*nodeList)[tracker+1]
+			return tracker + 1 + getChildrenCount(valueNode.node)
+		}
 	}
 
-	return updatedTracker
+	return skipCurrentNode(currentNode.node, tracker)
 }
 
 func getStringFromSlice(yamlLines []string, newline string) (fixedYamlString string) {

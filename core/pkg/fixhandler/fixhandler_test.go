@@ -227,11 +227,6 @@ func TestApplyFixKeepsFormatting(t *testing.T) {
 	}
 }
 
-// TestApplyFixToContent_EmptyLeadingDocument guards the regression from issue
-// #2495: a file whose first document is empty (a comment followed by "---") is
-// decoded inconsistently by go-yaml and yqlib, which used to make the fix
-// renderer call logger.Fatal and os.Exit the whole process mid-write (leaving
-// an empty SARIF file). It must now return an error gracefully instead.
 func TestApplyFixToContent_EmptyLeadingDocument(t *testing.T) {
 	yamlContent := "# a comment, followed by a document separator\n---\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: demo\nspec:\n  template:\n    spec:\n      containers:\n        - name: app\n          image: nginx:1.27\n"
 	// The scanner counts the empty leading document, so the Deployment is di==1.
@@ -239,8 +234,9 @@ func TestApplyFixToContent_EmptyLeadingDocument(t *testing.T) {
 
 	got, err := ApplyFixToContent(context.Background(), yamlContent, expression)
 
-	assert.Error(t, err, "expected a graceful error rather than a process exit")
-	assert.Empty(t, got)
+	require.NoError(t, err)
+	assert.Contains(t, got, "# a comment, followed by a document separator")
+	assert.Contains(t, got, "image: nginx:1.28")
 }
 
 func Test_fixPathToValidYamlExpression(t *testing.T) {
