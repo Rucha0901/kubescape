@@ -45,6 +45,7 @@ var newVersionCheckHandler = func() versioncheck.IVersionCheckHandler {
 
 func GetUpdateCmd(ks meta.IKubescape) *cobra.Command {
 	var updateFormat string
+	var quiet bool
 	updateCmd := &cobra.Command{
 		Use:     "update",
 		Short:   "Update to latest release version",
@@ -77,7 +78,9 @@ func GetUpdateCmd(ks meta.IKubescape) *cobra.Command {
 				if err != nil {
 					return fmt.Errorf("failed to marshal update info: %w", err)
 				}
-				_, err = fmt.Fprintln(cmd.OutOrStdout(), string(b))
+				if !(quiet && versioncheck.BuildNumber == versioncheck.LatestReleaseVersion) {
+					_, err = fmt.Fprintln(cmd.OutOrStdout(), string(b))
+				}
 				return err
 			}
 
@@ -90,6 +93,9 @@ func GetUpdateCmd(ks meta.IKubescape) *cobra.Command {
 				logger.L().Info("Failed to check for updates")
 			} else if versioncheck.BuildNumber == versioncheck.LatestReleaseVersion {
 				//your version == latest version
+				if quiet {
+					return nil
+				}
 				logger.L().Info("Nothing to update: you are running the latest version", helpers.String("Version", versioncheck.BuildNumber))
 			} else {
 				fmt.Printf("Version %s is available. Please refer to our installation documentation: %s\n", versioncheck.LatestReleaseVersion, installationLink)
@@ -98,5 +104,6 @@ func GetUpdateCmd(ks meta.IKubescape) *cobra.Command {
 		},
 	}
 	updateCmd.Flags().StringVarP(&updateFormat, "format", "f", "text", "Output format. Supported formats: text, json")
+	updateCmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "Disable output when there are no updates available")
 	return updateCmd
 }

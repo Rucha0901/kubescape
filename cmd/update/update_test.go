@@ -215,3 +215,41 @@ func TestUpdateCommandDoesNotHonorSkipUpdateCheckEnv(t *testing.T) {
 	assert.True(t, isReal, "update command must use the real version-check handler at runtime")
 	assert.False(t, isMock, "update command must not use the skip-check mock when KS_SKIP_UPDATE_CHECK is set")
 }
+
+func TestGetUpdateCmd_QuietFlag(t *testing.T) {
+	withVersionCheckHandler(t, &stubVersionCheckHandler{latest: "v3.0.0"})
+	withVersionGlobals(t, "v3.0.0", "v3.0.0")
+
+	cmd := GetUpdateCmd(&stubKubescape{ctx: context.Background()})
+	require.NotNil(t, cmd)
+
+	err := cmd.Flags().Set("quiet", "true")
+	require.NoError(t, err)
+
+	assert.NoError(t, cmd.RunE(cmd, []string{}))
+}
+
+func TestGetUpdateCmd_QuietFlagWithUpdateAvailable(t *testing.T) {
+	withVersionCheckHandler(t, &stubVersionCheckHandler{latest: "v3.1.0"})
+	withVersionGlobals(t, "v3.0.0", "")
+
+	cmd := GetUpdateCmd(&stubKubescape{ctx: context.Background()})
+	require.NotNil(t, cmd)
+
+	err := cmd.Flags().Set("quiet", "true")
+	require.NoError(t, err)
+
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	origStdout := os.Stdout
+	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = origStdout })
+
+	assert.NoError(t, cmd.RunE(cmd, []string{}))
+	require.NoError(t, w.Close())
+	out, err := io.ReadAll(r)
+	require.NoError(t, err)
+
+	assert.Equal(t, "v3.1.0", versioncheck.LatestReleaseVersion)
+	assert.Contains(t, string(out), "Version v3.1.0 is available.")
+}
