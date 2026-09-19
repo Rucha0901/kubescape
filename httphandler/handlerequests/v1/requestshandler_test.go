@@ -42,7 +42,7 @@ func TestScan(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(OutputDir, scanID+".json"), b, 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(OutputDir, scanID+".json"), b, 0o600); err != nil {
 			t.Fatal(err)
 		}
 		return nil, nil
@@ -104,7 +104,7 @@ func TestScan_SyncResponse(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					if err := os.WriteFile(filepath.Join(OutputDir, scanID+".json"), b, 0o644); err != nil {
+					if err := os.WriteFile(filepath.Join(OutputDir, scanID+".json"), b, 0o600); err != nil {
 						t.Fatal(err)
 					}
 				}
