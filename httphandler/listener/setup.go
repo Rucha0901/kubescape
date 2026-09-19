@@ -40,6 +40,7 @@ const (
 	// authTokenEnv gates optional bearer-token auth for /v1/*. When set, every
 	// /v1/* request must present `Authorization: Bearer <token>`. When unset the
 	// listener remains unauthenticated for backward compatibility (in-cluster only).
+	//nolint:gosec // G101: Environment variable name, not a hardcoded credential
 	authTokenEnv = "KS_API_TOKEN"
 )
 
