@@ -230,7 +230,11 @@ func TestShutdown_DisconnectedWaiterDoesNotReleaseScan(t *testing.T) {
 					}
 					close(started)
 					<-release
-					assert.NoError(t, ctx.Err())
+					if metrics {
+						assert.ErrorIs(t, ctx.Err(), context.Canceled)
+					} else {
+						assert.NoError(t, ctx.Err())
+					}
 					for _, path := range artifacts {
 						assert.NoError(t, os.WriteFile(path, []byte("complete"), 0600))
 					}

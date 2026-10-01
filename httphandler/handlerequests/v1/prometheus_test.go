@@ -73,19 +73,21 @@ func TestGetPrometheusDefaultScanCommand(t *testing.T) {
 	}
 }
 
-// TestMetrics_ScanContextDecoupledFromRequest ensures the metrics scan is not
-// aborted when the scrape request context is cancelled (e.g. a Prometheus
-// scrape timeout): the scan must keep running to completion.
-func TestMetrics_ScanContextDecoupledFromRequest(t *testing.T) {
+// TestMetrics_ScanContextCancelledOnRequestDisconnect ensures the metrics scan is
+// cancelled when the scrape request context is cancelled (e.g. a Prometheus
+// scrape timeout) to avoid wasting cluster resources on abandoned scrapes.
+func TestMetrics_ScanContextCancelledOnRequestDisconnect(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		defer func(o scanner) { scanImpl = o }(scanImpl)
 		scanCtxErr := make(chan error, 1)
 
 		reqCtx, cancel := context.WithCancel(context.Background())
+		scanStarted := make(chan struct{})
 		scanImpl = func(ctx context.Context, _ *cautils.ScanInfo, _ []cautils.PolicyIdentifier, _ string, _ bool) (*reporthandlingv2.PostureReport, error) {
-			cancel() // simulate the scrape connection going away mid-scan
+			close(scanStarted)
+			<-ctx.Done()
 			scanCtxErr <- ctx.Err()
-			return nil, nil
+			return nil, ctx.Err()
 		}
 
 		h := NewHTTPHandler(false)
@@ -99,10 +101,17 @@ func TestMetrics_ScanContextDecoupledFromRequest(t *testing.T) {
 		}()
 
 		select {
-		case err := <-scanCtxErr:
-			assert.NoError(t, err, "scan context must not be cancelled when the request context is")
+		case <-scanStarted:
+			cancel() // simulate the scrape connection going away mid-scan
 		case <-time.After(5 * time.Second):
 			t.Fatal("scan was not invoked")
+		}
+
+		select {
+		case err := <-scanCtxErr:
+			assert.ErrorIs(t, err, context.Canceled, "scan context must be cancelled when the request context is")
+		case <-time.After(5 * time.Second):
+			t.Fatal("scan was not cancelled")
 		}
 
 		select {

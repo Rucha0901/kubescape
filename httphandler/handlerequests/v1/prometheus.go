@@ -71,11 +71,11 @@ func (handler *HTTPHandler) Metrics(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The worker owns accepted work even if the HTTP caller disconnects.
 	var results *utilsmetav1.Response
 	select {
 	case results = <-scanParams.resp:
 	case <-r.Context().Done():
+		cancel()
 		// Wait for the worker to finish writing before removing abandoned results.
 		go func() {
 			<-scanParams.resp
