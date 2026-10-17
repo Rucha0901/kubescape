@@ -22,6 +22,8 @@ func TestRegisteredStorageToolsRejectMalformedArguments(t *testing.T) {
 		"list_vulnerability_matches_for_cve",
 		"list_configuration_security_scan_manifests",
 		"get_configuration_security_scan_manifest",
+		"list_container_profiles",
+		"get_container_profile",
 	}
 	malformed := []struct {
 		name      string
@@ -55,6 +57,7 @@ func TestRegisteredStorageToolsAcceptNullAsNoArguments(t *testing.T) {
 	for _, tool := range []string{
 		"list_vulnerability_manifests",
 		"list_configuration_security_scan_manifests",
+		"list_container_profiles",
 	} {
 		t.Run(tool, func(t *testing.T) {
 			result := registeredToolResult(t, dispatchRegisteredTool(t, ksServer, tool, nil))
@@ -77,7 +80,10 @@ func TestRegisteredStorageToolsDispatchToTheirDeclaredNames(t *testing.T) {
 	configurationManifest := &storagev1beta1.WorkloadConfigurationScan{
 		ObjectMeta: metav1.ObjectMeta{Name: "deployment-nginx", Namespace: "security"},
 	}
-	ksServer := newRegisteredStorageToolTestServer(vulnerabilityManifest, configurationManifest)
+	containerProfile := &storagev1beta1.ContainerProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "deployment-nginx-nginx", Namespace: "security"},
+	}
+	ksServer := newRegisteredStorageToolTestServer(vulnerabilityManifest, configurationManifest, containerProfile)
 
 	tests := []struct {
 		name       string
@@ -128,6 +134,23 @@ func TestRegisteredStorageToolsDispatchToTheirDeclaredNames(t *testing.T) {
 			assertJSON: func(t *testing.T, value any) {
 				metadata := value.(map[string]any)["metadata"].(map[string]any)
 				assert.Equal(t, "deployment-nginx", metadata["name"])
+			},
+		},
+		{
+			name: "list container profiles", tool: "list_container_profiles",
+			arguments: map[string]any{"namespace": "security"},
+			assertJSON: func(t *testing.T, value any) {
+				profiles := value.(map[string]any)["container_profiles"].(map[string]any)["profiles"].([]any)
+				require.Len(t, profiles, 1)
+				assert.Equal(t, "deployment-nginx-nginx", profiles[0].(map[string]any)["profile_name"])
+			},
+		},
+		{
+			name: "get container profile", tool: "get_container_profile",
+			arguments: map[string]any{"namespace": "security", "profile_name": "deployment-nginx-nginx"},
+			assertJSON: func(t *testing.T, value any) {
+				metadata := value.(map[string]any)["metadata"].(map[string]any)
+				assert.Equal(t, "deployment-nginx-nginx", metadata["name"])
 			},
 		},
 	}
@@ -186,5 +209,6 @@ func newRegisteredStorageToolTestServer(objects ...runtime.Object) *KubescapeMcp
 	}
 	createVulnerabilityToolsAndResources(ksServer)
 	createConfigurationsToolsAndResources(ksServer)
+	createRuntimeToolsAndResources(ksServer)
 	return ksServer
 }

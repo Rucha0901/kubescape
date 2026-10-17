@@ -38,6 +38,9 @@ func TestCallToolValidation(t *testing.T) {
 	client.PrependReactor("list", "*", func(action clienttesting.Action) (handled bool, ret runtime.Object, err error) {
 		return true, nil, fmt.Errorf("simulated list error")
 	})
+	client.PrependReactor("get", "*", func(action clienttesting.Action) (handled bool, ret runtime.Object, err error) {
+		return true, nil, fmt.Errorf("simulated get error")
+	})
 	ksErrorServer := &KubescapeMcpserver{ksClient: client.SpdxV1beta1()}
 
 	tests := []struct {
@@ -62,9 +65,13 @@ func TestCallToolValidation(t *testing.T) {
 		{name: "profile get requires name", server: ksServer, tool: "get_container_profile", arguments: map[string]any{}, wantError: "profile_name argument is required", expectToolError: true},
 		{name: "profile name type", server: ksServer, tool: "get_container_profile", arguments: map[string]any{"profile_name": 42}, wantError: "profile_name argument must be a string", expectToolError: true},
 
-		{name: "vulnerability list kubernetes error", server: ksErrorServer, tool: "list_vulnerability_manifests", arguments: map[string]any{}, wantError: "simulated list error", expectToolError: false},
-		{name: "configuration list kubernetes error", server: ksErrorServer, tool: "list_configuration_security_scan_manifests", arguments: map[string]any{}, wantError: "simulated list error", expectToolError: false},
-		{name: "profile list kubernetes error", server: ksErrorServer, tool: "list_container_profiles", arguments: map[string]any{}, wantError: "simulated list error", expectToolError: false},
+		{name: "vulnerability list kubernetes error", server: ksErrorServer, tool: "list_vulnerability_manifests", arguments: map[string]any{}, wantError: "simulated list error", expectToolError: true},
+		{name: "configuration list kubernetes error", server: ksErrorServer, tool: "list_configuration_security_scan_manifests", arguments: map[string]any{}, wantError: "simulated list error", expectToolError: true},
+		{name: "profile list kubernetes error", server: ksErrorServer, tool: "list_container_profiles", arguments: map[string]any{}, wantError: "simulated list error", expectToolError: true},
+		{name: "vulnerability get kubernetes error", server: ksErrorServer, tool: "list_vulnerabilities_in_manifest", arguments: map[string]any{"manifest_name": "nginx"}, wantError: "simulated get error", expectToolError: true},
+		{name: "CVE match get kubernetes error", server: ksErrorServer, tool: "list_vulnerability_matches_for_cve", arguments: map[string]any{"manifest_name": "nginx", "cve_id": "CVE-2026-1000"}, wantError: "simulated get error", expectToolError: true},
+		{name: "configuration get kubernetes error", server: ksErrorServer, tool: "get_configuration_security_scan_manifest", arguments: map[string]any{"manifest_name": "nginx"}, wantError: "simulated get error", expectToolError: true},
+		{name: "profile get kubernetes error", server: ksErrorServer, tool: "get_container_profile", arguments: map[string]any{"profile_name": "nginx"}, wantError: "simulated get error", expectToolError: true},
 	}
 
 	for _, test := range tests {
@@ -316,6 +323,53 @@ func TestGetConfigurationDrift_MarshalErrorIsToolError(t *testing.T) {
 	text := toolResultText(t, result)
 	assert.Contains(t, text, "failed to marshal workload manifest")
 	assert.Contains(t, text, "marshal boom")
+}
+
+func TestLegacyStorageTools_MarshalErrorIsToolError(t *testing.T) {
+	orig := jsonMarshal
+	t.Cleanup(func() { jsonMarshal = orig })
+	jsonMarshal = func(any) ([]byte, error) {
+		return nil, fmt.Errorf("marshal boom")
+	}
+
+	vuln := &storagev1beta1.VulnerabilityManifest{
+		ObjectMeta: metav1.ObjectMeta{Name: "nginx", Namespace: "kubescape"},
+	}
+	config := &storagev1beta1.WorkloadConfigurationScan{
+		ObjectMeta: metav1.ObjectMeta{Name: "nginx", Namespace: "kubescape"},
+	}
+	profile := &storagev1beta1.ContainerProfile{
+		ObjectMeta: metav1.ObjectMeta{Name: "nginx", Namespace: "kubescape"},
+	}
+	ksClient := storagefake.NewClientset(vuln, config, profile)
+	ksServer := &KubescapeMcpserver{ksClient: ksClient.SpdxV1beta1()}
+
+	tools := []struct {
+		tool string
+		args map[string]any
+	}{
+		{"list_vulnerability_manifests", map[string]any{}},
+		{"list_vulnerabilities_in_manifest", map[string]any{"manifest_name": "nginx"}},
+		{"list_vulnerability_matches_for_cve", map[string]any{"manifest_name": "nginx", "cve_id": "CVE-2026-1000"}},
+		{"list_configuration_security_scan_manifests", map[string]any{}},
+		{"get_configuration_security_scan_manifest", map[string]any{"manifest_name": "nginx"}},
+		{"list_container_profiles", map[string]any{}},
+		{"get_container_profile", map[string]any{"profile_name": "nginx"}},
+	}
+
+	for _, tt := range tools {
+		t.Run(tt.tool, func(t *testing.T) {
+			result, err := ksServer.CallTool(context.Background(), tt.tool, tt.args)
+			require.NoError(t, err)
+			require.NotNil(t, result)
+			assert.True(t, result.IsError)
+			text := toolResultText(t, result)
+			var toolErr ToolError
+			require.NoError(t, json.Unmarshal([]byte(text), &toolErr))
+			assert.Equal(t, ErrCodeMarshalError, toolErr.Code)
+			assert.Contains(t, toolErr.Message, "marshal boom")
+		})
+	}
 }
 
 func TestGetConfigurationDrift_SupportsAllWorkloadKinds(t *testing.T) {

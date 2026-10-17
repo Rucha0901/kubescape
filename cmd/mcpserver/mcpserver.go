@@ -917,7 +917,7 @@ func (ksServer *KubescapeMcpserver) CallTool(ctx context.Context, name string, a
 		}
 		chunk, err := client.VulnerabilityManifests(namespace).List(ctx, listOpts)
 		if err != nil {
-			return nil, err
+			return mcpToolError(classifyScanError(err), fmt.Sprintf("failed to list vulnerability manifests: %v", err), nil), nil
 		}
 
 		if chunk.GetContinue() != "" {
@@ -955,9 +955,9 @@ func (ksServer *KubescapeMcpserver) CallTool(ctx context.Context, name string, a
 			"vulnerability_manifest_cve_details": "kubescape://vulnerability-manifests/{namespace}/{manifest_name}/cve_details/{cve_id}",
 		}
 
-		content, err := json.Marshal(result)
+		content, err := jsonMarshal(result)
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal result: %w", err)
+			return mcpToolError(ErrCodeMarshalError, fmt.Sprintf("failed to marshal result: %v", err), nil), nil
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
@@ -989,11 +989,11 @@ func (ksServer *KubescapeMcpserver) CallTool(ctx context.Context, name string, a
 		}
 		manifest, err := client.VulnerabilityManifests(namespaceStr).Get(ctx, manifestNameStr, metav1.GetOptions{})
 		if err != nil {
-			return nil, fmt.Errorf("failed to get vulnerability manifest: %w", err)
+			return mcpToolError(classifyScanError(err), fmt.Sprintf("failed to get vulnerability manifest: %v", err), nil), nil
 		}
-		responseJson, err := json.Marshal(listVulnerabilities(manifest.Spec.Payload.Matches, listOpts))
+		responseJson, err := jsonMarshal(listVulnerabilities(manifest.Spec.Payload.Matches, listOpts))
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal cve list: %w", err)
+			return mcpToolError(ErrCodeMarshalError, fmt.Sprintf("failed to marshal cve list: %v", err), nil), nil
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
@@ -1025,7 +1025,7 @@ func (ksServer *KubescapeMcpserver) CallTool(ctx context.Context, name string, a
 		}
 		manifest, err := client.VulnerabilityManifests(namespaceStr).Get(ctx, manifestNameStr, metav1.GetOptions{})
 		if err != nil {
-			return nil, fmt.Errorf("failed to get vulnerability manifest: %w", err)
+			return mcpToolError(classifyScanError(err), fmt.Sprintf("failed to get vulnerability manifest: %v", err), nil), nil
 		}
 		match := []v1beta1.Match{}
 		for _, m := range manifest.Spec.Payload.Matches {
@@ -1033,9 +1033,9 @@ func (ksServer *KubescapeMcpserver) CallTool(ctx context.Context, name string, a
 				match = append(match, m)
 			}
 		}
-		responseJson, err := json.Marshal(match)
+		responseJson, err := jsonMarshal(match)
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal cve details: %w", err)
+			return mcpToolError(ErrCodeMarshalError, fmt.Sprintf("failed to marshal cve details: %v", err), nil), nil
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
@@ -1065,7 +1065,7 @@ func (ksServer *KubescapeMcpserver) CallTool(ctx context.Context, name string, a
 
 		chunk, err := client.WorkloadConfigurationScans(namespaceStr).List(ctx, metav1.ListOptions{Limit: 100, Continue: continueToken})
 		if err != nil {
-			return nil, err
+			return mcpToolError(classifyScanError(err), fmt.Sprintf("failed to list configuration manifests: %v", err), nil), nil
 		}
 
 		var manifests v1beta1.WorkloadConfigurationScanList
@@ -1091,9 +1091,9 @@ func (ksServer *KubescapeMcpserver) CallTool(ctx context.Context, name string, a
 		if chunk.GetContinue() != "" {
 			result["continue"] = chunk.GetContinue()
 		}
-		content, err := json.Marshal(result)
+		content, err := jsonMarshal(result)
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal result: %w", err)
+			return mcpToolError(ErrCodeMarshalError, fmt.Sprintf("failed to marshal result: %v", err), nil), nil
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
@@ -1125,12 +1125,12 @@ func (ksServer *KubescapeMcpserver) CallTool(ctx context.Context, name string, a
 		}
 		manifest, err := client.WorkloadConfigurationScans(namespaceStr).Get(ctx, manifestNameStr, metav1.GetOptions{})
 		if err != nil {
-			return nil, fmt.Errorf("failed to get configuration manifest: %w", err)
+			return mcpToolError(classifyScanError(err), fmt.Sprintf("failed to get configuration manifest: %v", err), nil), nil
 		}
 		manifest.Spec.Controls = filterScannedControls(manifest.Spec.Controls, controlFilter)
-		responseJson, err := json.Marshal(manifest)
+		responseJson, err := jsonMarshal(manifest)
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal configuration manifest: %w", err)
+			return mcpToolError(ErrCodeMarshalError, fmt.Sprintf("failed to marshal configuration manifest: %v", err), nil), nil
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
@@ -1159,7 +1159,7 @@ func (ksServer *KubescapeMcpserver) CallTool(ctx context.Context, name string, a
 
 		chunk, err := client.ContainerProfiles(namespace).List(ctx, metav1.ListOptions{Limit: 100, Continue: continueToken})
 		if err != nil {
-			return nil, err
+			return mcpToolError(classifyScanError(err), fmt.Sprintf("failed to list container profiles: %v", err), nil), nil
 		}
 
 		var profiles v1beta1.ContainerProfileList
@@ -1185,9 +1185,9 @@ func (ksServer *KubescapeMcpserver) CallTool(ctx context.Context, name string, a
 		if chunk.GetContinue() != "" {
 			result["continue"] = chunk.GetContinue()
 		}
-		content, err := json.Marshal(result)
+		content, err := jsonMarshal(result)
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal result: %w", err)
+			return mcpToolError(ErrCodeMarshalError, fmt.Sprintf("failed to marshal result: %v", err), nil), nil
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
@@ -1215,11 +1215,11 @@ func (ksServer *KubescapeMcpserver) CallTool(ctx context.Context, name string, a
 		}
 		profile, err := client.ContainerProfiles(namespaceStr).Get(ctx, profileNameStr, metav1.GetOptions{})
 		if err != nil {
-			return nil, fmt.Errorf("failed to get container profile: %w", err)
+			return mcpToolError(classifyScanError(err), fmt.Sprintf("failed to get container profile: %v", err), nil), nil
 		}
-		responseJson, err := json.Marshal(profile)
+		responseJson, err := jsonMarshal(profile)
 		if err != nil {
-			return nil, fmt.Errorf("failed to marshal container profile: %w", err)
+			return mcpToolError(ErrCodeMarshalError, fmt.Sprintf("failed to marshal container profile: %v", err), nil), nil
 		}
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{
