@@ -116,22 +116,25 @@ func createServiceExposureTools(ksServer *KubescapeMcpserver) {
 			// cross-namespace backendRef exists that it cannot confirm one way or
 			// the other -- collecting only the queried namespace would make that
 			// signal silently unreachable.
+			var gatewayWarnings []string
 			gatewayResources := map[string]workloadinterface.IMetadata{}
 			routeList, routeErr := listGatewayKind(ctx, dynClient, httpRouteGVR, httpRouteGVRv1beta1)
 			if routeErr != nil {
-				return mcpToolError(classifyScanError(routeErr), fmt.Sprintf("failed to list HTTPRoute objects: %v", routeErr), map[string]any{"resource_type": "HTTPRoute"})
-			}
-			for i := range routeList.Items {
-				w := workloadinterface.NewWorkloadObj(routeList.Items[i].Object)
-				gatewayResources[w.GetID()] = w
+				gatewayWarnings = append(gatewayWarnings, fmt.Sprintf("Gateway API HTTPRoute-based external exposure could not be determined (%s): exposure for services behind an HTTPRoute may be incomplete, not confirmed absent", classifyScanErrorMessage(classifyScanError(routeErr), "HTTPRoute", routeErr)))
+			} else {
+				for i := range routeList.Items {
+					w := workloadinterface.NewWorkloadObj(routeList.Items[i].Object)
+					gatewayResources[w.GetID()] = w
+				}
 			}
 			grpcRouteList, grpcRouteErr := listGatewayKind(ctx, dynClient, grpcRouteGVR, grpcRouteGVRv1alpha2)
 			if grpcRouteErr != nil {
-				return mcpToolError(classifyScanError(grpcRouteErr), fmt.Sprintf("failed to list GRPCRoute objects: %v", grpcRouteErr), map[string]any{"resource_type": "GRPCRoute"})
-			}
-			for i := range grpcRouteList.Items {
-				w := workloadinterface.NewWorkloadObj(grpcRouteList.Items[i].Object)
-				gatewayResources[w.GetID()] = w
+				gatewayWarnings = append(gatewayWarnings, fmt.Sprintf("Gateway API GRPCRoute-based external exposure could not be determined (%s): exposure for services behind a GRPCRoute may be incomplete, not confirmed absent", classifyScanErrorMessage(classifyScanError(grpcRouteErr), "GRPCRoute", grpcRouteErr)))
+			} else {
+				for i := range grpcRouteList.Items {
+					w := workloadinterface.NewWorkloadObj(grpcRouteList.Items[i].Object)
+					gatewayResources[w.GetID()] = w
+				}
 			}
 			// Gateways are listed cluster-wide, not scoped to namespace: the
 			// dominant real-world topology puts the Gateway in an infra
@@ -142,11 +145,12 @@ func createServiceExposureTools(ksServer *KubescapeMcpserver) {
 			// invisible to idx.routeAttachesToAGateway.
 			gwList, gwErr := listGatewayKind(ctx, dynClient, gatewayGVR, gatewayGVRv1beta1)
 			if gwErr != nil {
-				return mcpToolError(classifyScanError(gwErr), fmt.Sprintf("failed to list Gateway objects: %v", gwErr), map[string]any{"resource_type": "Gateway"})
-			}
-			for i := range gwList.Items {
-				w := workloadinterface.NewWorkloadObj(gwList.Items[i].Object)
-				gatewayResources[w.GetID()] = w
+				gatewayWarnings = append(gatewayWarnings, fmt.Sprintf("Gateway API Gateway-based external exposure could not be determined (%s): exposure for services behind a Gateway-admitted route may be incomplete, not confirmed absent", classifyScanErrorMessage(classifyScanError(gwErr), "Gateway", gwErr)))
+			} else {
+				for i := range gwList.Items {
+					w := workloadinterface.NewWorkloadObj(gwList.Items[i].Object)
+					gatewayResources[w.GetID()] = w
+				}
 			}
 			httpRoutes, gateways, gwDecodeErrs := exposure.FromUnstructuredGatewayAPI(gatewayResources)
 			decodeErrs = append(decodeErrs, gwDecodeErrs...)
@@ -176,12 +180,18 @@ func createServiceExposureTools(ksServer *KubescapeMcpserver) {
 				"namespace": namespace,
 				"services":  findings,
 			}
+			var warnings []string
 			if len(decodeErrs) > 0 {
 				msgs := make([]string, len(decodeErrs))
 				for i, e := range decodeErrs {
 					msgs[i] = e.Error()
 				}
 				result["decode_warnings"] = msgs
+				warnings = append(warnings, msgs...)
+			}
+			warnings = append(warnings, gatewayWarnings...)
+			if len(warnings) > 0 {
+				result["warnings"] = warnings
 			}
 
 			resBytes, err := json.Marshal(result)

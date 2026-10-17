@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/kubescape/k8s-interface/k8sinterface"
@@ -197,20 +198,63 @@ func TestAnalyzeServiceExposure_MissingGatewayAPIIsNotFatal(t *testing.T) {
 	require.False(t, result.IsError, "a cluster without the Gateway API installed must not fail the whole tool")
 }
 
-func TestAnalyzeServiceExposure_UnexpectedGatewayAPIListErrorIsFatal(t *testing.T) {
-	svc := unstructuredService("prod", "app", "ClusterIP")
-	ksServer := newServiceExposureTestServer(t, svc)
+func TestAnalyzeServiceExposure_GatewayAPIListErrorDegradesGracefullyWithWarning(t *testing.T) {
+	tests := []struct {
+		name         string
+		resource     string
+		expectedKind string
+	}{
+		{
+			name:         "HTTPRoute list failure",
+			resource:     httpRouteGVR.Resource,
+			expectedKind: "HTTPRoute",
+		},
+		{
+			name:         "GRPCRoute list failure",
+			resource:     grpcRouteGVR.Resource,
+			expectedKind: "GRPCRoute",
+		},
+		{
+			name:         "Gateway list failure",
+			resource:     gatewayGVR.Resource,
+			expectedKind: "Gateway",
+		},
+	}
 
-	dyn := ksServer.k8sClient.DynamicClient.(*dynamicfake.FakeDynamicClient)
-	dyn.PrependReactor("list", httpRouteGVR.Resource, func(k8stesting.Action) (bool, runtime.Object, error) {
-		return true, nil, errors.New("connection refused")
-	})
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := unstructuredService("prod", "app", "ClusterIP")
+			ksServer := newServiceExposureTestServer(t, svc)
 
-	result := registeredToolResult(t, dispatchRegisteredTool(t, ksServer, "analyze_service_exposure", map[string]any{
-		"namespace":    "prod",
-		"service_name": "app",
-	}))
-	require.True(t, result.IsError, "a genuine list failure (not a missing-API shape) must surface as a tool error, not be silently swallowed")
+			dyn := ksServer.k8sClient.DynamicClient.(*dynamicfake.FakeDynamicClient)
+			dyn.PrependReactor("list", tc.resource, func(k8stesting.Action) (bool, runtime.Object, error) {
+				return true, nil, errors.New("connection refused")
+			})
+
+			result := registeredToolResult(t, dispatchRegisteredTool(t, ksServer, "analyze_service_exposure", map[string]any{
+				"namespace":    "prod",
+				"service_name": "app",
+			}))
+			require.False(t, result.IsError, "a Gateway API list error must degrade gracefully, not fail the whole analysis")
+
+			var parsed map[string]any
+			require.NoError(t, json.Unmarshal([]byte(toolResultText(t, result)), &parsed))
+			services, ok := parsed["services"].(map[string]any)
+			require.True(t, ok)
+			require.Contains(t, services, "app")
+
+			warnings, ok := parsed["warnings"].([]any)
+			require.True(t, ok, "warnings must be included in the result")
+			foundWarning := false
+			for _, w := range warnings {
+				if ws, ok := w.(string); ok && strings.Contains(ws, tc.expectedKind) && strings.Contains(ws, "incomplete") {
+					foundWarning = true
+					break
+				}
+			}
+			require.True(t, foundWarning, "warnings must call out that %s exposure may be incomplete: %v", tc.expectedKind, warnings)
+		})
+	}
 }
 
 func TestAnalyzeServiceExposure_HTTPRouteThroughGatewayExposesService(t *testing.T) {
