@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/google/cel-go/cel"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -25,6 +26,7 @@ func createAdvancedTools(ksServer *KubescapeMcpserver) {
 		mcp.WithString("namespace", mcp.Description("Namespace (optional, defaults to all)")),
 		mcp.WithNumber("limit", mcp.Description("Number of resources to fetch in this slice (default 10)")),
 		mcp.WithString("continue", mcp.Description("Continue token for pagination (optional)")),
+		mcp.WithBoolean("include_status", mcp.Description("Include status section of each resource (optional, defaults to false)")),
 	)
 
 	ksServer.s.AddTool(scanResourceSliceTool, func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -56,6 +58,11 @@ func createAdvancedTools(ksServer *KubescapeMcpserver) {
 		}
 
 		continueToken, toolErr := mcpStringArg(args, "continue")
+		if toolErr != nil {
+			return toolErr, nil
+		}
+
+		includeStatus, toolErr := mcpBoolArg(args, "include_status")
 		if toolErr != nil {
 			return toolErr, nil
 		}
@@ -109,15 +116,31 @@ func createAdvancedTools(ksServer *KubescapeMcpserver) {
 		// reject a null.
 		simplifiedItems := make([]map[string]any, 0, len(list.Items))
 		for _, item := range list.Items {
-			simplifiedItems = append(simplifiedItems, map[string]any{
+			metadata := map[string]any{
+				"name":      item.GetName(),
+				"namespace": item.GetNamespace(),
+			}
+			if labels := item.GetLabels(); len(labels) > 0 {
+				metadata["labels"] = labels
+			}
+			if annotations := item.GetAnnotations(); len(annotations) > 0 {
+				metadata["annotations"] = annotations
+			}
+			if ts := item.GetCreationTimestamp(); !ts.IsZero() {
+				metadata["creationTimestamp"] = ts.Time.UTC().Format(time.RFC3339)
+			}
+			simplified := map[string]any{
 				"apiVersion": item.GetAPIVersion(),
 				"kind":       item.GetKind(),
-				"metadata": map[string]any{
-					"name":      item.GetName(),
-					"namespace": item.GetNamespace(),
-				},
-				"spec": item.Object["spec"],
-			})
+				"metadata":   metadata,
+				"spec":       item.Object["spec"],
+			}
+			if includeStatus {
+				if status, ok := item.Object["status"]; ok && status != nil {
+					simplified["status"] = status
+				}
+			}
+			simplifiedItems = append(simplifiedItems, simplified)
 		}
 
 		result := map[string]any{

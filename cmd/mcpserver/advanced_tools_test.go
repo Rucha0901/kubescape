@@ -53,6 +53,144 @@ func TestScanResourceSlice_EmptyResultMarshalsAsEmptyArray(t *testing.T) {
 	require.JSONEq(t, `{"resources":[],"continue":"","count":0}`, raw)
 }
 
+// TestScanResourceSlice_PropagatesLabelsAnnotationsAndCreationTimestamp verifies
+// that simplified items preserve labels, annotations, and creationTimestamp
+// so downstream security analysis tools (e.g. NetworkPolicy and Service routing)
+// have the necessary metadata without redundant API calls.
+func TestScanResourceSlice_PropagatesLabelsAnnotationsAndCreationTimestamp(t *testing.T) {
+	listKinds := map[schema.GroupVersionResource]string{
+		{Group: "", Version: "v1", Resource: "pods"}: "PodList",
+	}
+
+	podWithMeta := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "v1",
+			"kind":       "Pod",
+			"metadata": map[string]any{
+				"name":              "security-pod",
+				"namespace":         "prod",
+				"labels":            map[string]any{"app": "web", "tier": "frontend"},
+				"annotations":       map[string]any{"kubescape.io/skip-vuln": "true"},
+				"creationTimestamp": "2026-01-01T00:00:00Z",
+				"managedFields":     []any{"noisy"},
+			},
+			"spec": map[string]any{
+				"containers": []any{
+					map[string]any{"name": "nginx", "image": "nginx:1.25"},
+				},
+			},
+			"status": map[string]any{
+				"phase": "Running",
+			},
+		},
+	}
+
+	podWithoutMeta := &unstructured.Unstructured{
+		Object: map[string]any{
+			"apiVersion": "v1",
+			"kind":       "Pod",
+			"metadata": map[string]any{
+				"name":      "plain-pod",
+				"namespace": "prod",
+			},
+			"spec": map[string]any{
+				"containers": []any{
+					map[string]any{"name": "busybox", "image": "busybox:latest"},
+				},
+			},
+		},
+	}
+
+	dyn := dynamicfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), listKinds, podWithMeta, podWithoutMeta)
+	ksServer := newTestMCPServerWithK8s(&k8sinterface.KubernetesApi{DynamicClient: dyn})
+
+	// 1. Without include_status (default: false)
+	result := registeredToolResult(t, dispatchRegisteredTool(t, ksServer, "scan_resource_slice", map[string]any{
+		"resource_kind": "pods",
+		"namespace":     "prod",
+	}))
+	require.False(t, result.IsError)
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal([]byte(toolResultText(t, result)), &parsed))
+	require.Equal(t, float64(2), parsed["count"])
+
+	resources, ok := parsed["resources"].([]any)
+	require.True(t, ok)
+	require.Len(t, resources, 2)
+
+	var secPod, plainPod map[string]any
+	for _, r := range resources {
+		rm, isMap := r.(map[string]any)
+		require.True(t, isMap)
+		meta, isMeta := rm["metadata"].(map[string]any)
+		require.True(t, isMeta)
+		switch meta["name"] {
+		case "security-pod":
+			secPod = rm
+		case "plain-pod":
+			plainPod = rm
+		}
+	}
+	require.NotNil(t, secPod, "security-pod must be found in resources")
+	require.NotNil(t, plainPod, "plain-pod must be found in resources")
+
+	// First pod has labels, annotations, and creationTimestamp; status and managedFields stripped
+	require.Equal(t, "v1", secPod["apiVersion"])
+	require.Equal(t, "Pod", secPod["kind"])
+	require.NotNil(t, secPod["spec"])
+	require.Nil(t, secPod["status"], "status must be excluded when include_status is omitted")
+
+	secMeta := secPod["metadata"].(map[string]any)
+	require.Equal(t, "security-pod", secMeta["name"])
+	require.Equal(t, "prod", secMeta["namespace"])
+	require.Equal(t, map[string]any{"app": "web", "tier": "frontend"}, secMeta["labels"])
+	require.Equal(t, map[string]any{"kubescape.io/skip-vuln": "true"}, secMeta["annotations"])
+	require.Equal(t, "2026-01-01T00:00:00Z", secMeta["creationTimestamp"])
+	require.Nil(t, secMeta["managedFields"], "managedFields should be stripped")
+
+	// Plain pod has no labels/annotations; ensure they are omitted, not null
+	plainMeta := plainPod["metadata"].(map[string]any)
+	require.Equal(t, "plain-pod", plainMeta["name"])
+	require.Equal(t, "prod", plainMeta["namespace"])
+	_, hasLabels := plainMeta["labels"]
+	require.False(t, hasLabels, "labels should be omitted when absent")
+	_, hasAnnotations := plainMeta["annotations"]
+	require.False(t, hasAnnotations, "annotations should be omitted when absent")
+
+	// 2. With include_status: true
+	resultStatus := registeredToolResult(t, dispatchRegisteredTool(t, ksServer, "scan_resource_slice", map[string]any{
+		"resource_kind":  "pods",
+		"namespace":      "prod",
+		"include_status": true,
+	}))
+	require.False(t, resultStatus.IsError)
+
+	var parsedStatus map[string]any
+	require.NoError(t, json.Unmarshal([]byte(toolResultText(t, resultStatus)), &parsedStatus))
+	resourcesStatus := parsedStatus["resources"].([]any)
+	var secPodWithStatus map[string]any
+	for _, r := range resourcesStatus {
+		rm := r.(map[string]any)
+		meta := rm["metadata"].(map[string]any)
+		if meta["name"] == "security-pod" {
+			secPodWithStatus = rm
+		}
+	}
+	require.NotNil(t, secPodWithStatus)
+	require.Equal(t, map[string]any{"phase": "Running"}, secPodWithStatus["status"])
+
+	// 3. Invalid include_status type returns INVALID_ARGUMENT error
+	resultInvalid := registeredToolResult(t, dispatchRegisteredTool(t, ksServer, "scan_resource_slice", map[string]any{
+		"resource_kind":  "pods",
+		"include_status": "not-a-boolean",
+	}))
+	require.True(t, resultInvalid.IsError)
+	var toolErr ToolError
+	require.NoError(t, json.Unmarshal([]byte(toolResultText(t, resultInvalid)), &toolErr))
+	require.Equal(t, ErrCodeInvalidArgument, toolErr.Code)
+}
+
 // TestScanResourceSlice_UnsupportedKindReturnsError guards against a silent
 // fallback to core/v1 for resource kinds the tool does not explicitly map
 // (e.g. "jobs"). Falling back would send a request to the wrong API group and
