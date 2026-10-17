@@ -380,3 +380,74 @@ func TestAnalyzeNetworkReachability_WhitespaceArgumentsRejected(t *testing.T) {
 		})
 	}
 }
+
+func TestAnalyzeNetworkReachability_SamePodIsAllowedEvenWithDefaultDeny(t *testing.T) {
+	deny := unstructuredNetworkPolicy("prod", "deny-all", map[string]any{
+		"podSelector": map[string]any{},
+		"policyTypes": []any{"Ingress", "Egress"},
+	})
+	server := unstructuredPod("prod", "server", map[string]any{"app": "server"})
+
+	ksServer := newReachabilityTestServer(deny, server)
+
+	result := registeredToolResult(t, dispatchRegisteredTool(t, ksServer, "analyze_network_reachability", map[string]any{
+		"source_namespace":      "prod",
+		"source_pod":            "server",
+		"destination_namespace": "prod",
+		"destination_pod":       "server",
+	}))
+	require.False(t, result.IsError)
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal([]byte(toolResultText(t, result)), &parsed))
+
+	require.Equal(t, "allowed", parsed["verdict"])
+
+	egress := parsed["egress"].(map[string]any)
+	require.Equal(t, "allowed", egress["verdict"])
+	require.Equal(t, "same-pod communication bypasses NetworkPolicy", egress["reason"])
+	require.Equal(t, "", egress["matched_policy"])
+
+	ingress := parsed["ingress"].(map[string]any)
+	require.Equal(t, "allowed", ingress["verdict"])
+	require.Equal(t, "same-pod communication bypasses NetworkPolicy", ingress["reason"])
+	require.Equal(t, "", ingress["matched_policy"])
+}
+
+func TestAnalyzeNetworkReachability_SamePodWithPortAndProtocol(t *testing.T) {
+	ksServer := newReachabilityTestServer()
+
+	result := registeredToolResult(t, dispatchRegisteredTool(t, ksServer, "analyze_network_reachability", map[string]any{
+		"source_namespace":      "prod",
+		"source_pod":            "app",
+		"destination_namespace": "prod",
+		"destination_pod":       "app",
+		"port":                  float64(8080),
+		"protocol":              "TCP",
+	}))
+	require.False(t, result.IsError)
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal([]byte(toolResultText(t, result)), &parsed))
+	require.Equal(t, "allowed", parsed["verdict"])
+	egress := parsed["egress"].(map[string]any)
+	require.Equal(t, "allowed", egress["verdict"])
+	require.Equal(t, "same-pod communication bypasses NetworkPolicy", egress["reason"])
+}
+
+func TestAnalyzeNetworkReachability_SamePodInvalidPortRejectedBeforeShortCircuit(t *testing.T) {
+	ksServer := newReachabilityTestServer()
+
+	result := registeredToolResult(t, dispatchRegisteredTool(t, ksServer, "analyze_network_reachability", map[string]any{
+		"source_namespace":      "prod",
+		"source_pod":            "app",
+		"destination_namespace": "prod",
+		"destination_pod":       "app",
+		"port":                  float64(70000),
+	}))
+	require.True(t, result.IsError)
+	var toolErr ToolError
+	require.NoError(t, json.Unmarshal([]byte(toolResultText(t, result)), &toolErr))
+	assert.Equal(t, ErrCodeInvalidArgument, toolErr.Code)
+}
+

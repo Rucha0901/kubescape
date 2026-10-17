@@ -92,6 +92,27 @@ func createNetworkReachabilityTools(ksServer *KubescapeMcpserver) {
 			params.Set("protocol", string(port.Protocol))
 		}
 		return ksServer.doAnalysis(ctx, "analyze_network_reachability", params, func(ctx context.Context) *mcp.CallToolResult {
+			if srcNS == dstNS && srcName == dstName {
+				result := map[string]any{
+					"verdict": networkpolicy.Allowed.String(),
+					"egress": map[string]any{
+						"verdict":        networkpolicy.Allowed.String(),
+						"reason":         "same-pod communication bypasses NetworkPolicy",
+						"matched_policy": "",
+					},
+					"ingress": map[string]any{
+						"verdict":        networkpolicy.Allowed.String(),
+						"reason":         "same-pod communication bypasses NetworkPolicy",
+						"matched_policy": "",
+					},
+				}
+				resBytes, err := json.Marshal(result)
+				if err != nil {
+					return mcpToolError(ErrCodeMarshalError, fmt.Sprintf("failed to marshal result: %v", err), nil)
+				}
+				return mcp.NewToolResultText(string(resBytes))
+			}
+
 			k8sClient, err := ksServer.getK8sClient()
 			if err != nil {
 				return mcpToolError(ErrCodeK8sClientError, fmt.Sprintf("failed to get k8s client: %v", err), nil)
