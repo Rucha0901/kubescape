@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"net/http"
@@ -395,7 +396,7 @@ func freePort(t *testing.T) string {
 	return p
 }
 
-func generateTestCertAndKey(t *testing.T, commonName string) ([]byte, []byte) {
+func generateTestCertAndKey(t testing.TB, commonName string) ([]byte, []byte) {
 	t.Helper()
 
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -694,4 +695,146 @@ func TestTLSReloader_ConcurrentGetCertificate(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// testConcurrentReload exercises concurrent GetCertificate calls while certificate and key
+// files are being rotated on disk simultaneously under contention.
+func testConcurrentReload(tb testing.TB, numReaders, numRotations int) {
+	tb.Helper()
+
+	dir := tb.TempDir()
+	certFile := filepath.Join(dir, "tls.crt")
+	keyFile := filepath.Join(dir, "tls.key")
+
+	certPEM, keyPEM := generateTestCertAndKey(tb, "initial.example.com")
+	require.NoError(tb, os.WriteFile(certFile, certPEM, 0o600))
+	require.NoError(tb, os.WriteFile(keyFile, keyPEM, 0o600))
+
+	reloader, err := newTLSReloader(certFile, keyFile)
+	require.NoError(tb, err)
+	require.NotNil(tb, reloader)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var wg sync.WaitGroup
+
+	// Reader goroutines continuously invoking GetCertificate
+	for i := 0; i < numReaders; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+					cert, err := reloader.GetCertificate(&tls.ClientHelloInfo{})
+					if err != nil {
+						tb.Errorf("GetCertificate returned unexpected error: %v", err)
+						return
+					}
+					if cert == nil || len(cert.Certificate) == 0 {
+						tb.Errorf("GetCertificate returned nil or empty certificate")
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	// Writer loop continuously rotating certificate and key files
+	for i := 0; i < numRotations; i++ {
+		cn := fmt.Sprintf("rotated-%d.example.com", i)
+		newCertPEM, newKeyPEM := generateTestCertAndKey(tb, cn)
+		require.NoError(tb, os.WriteFile(certFile, newCertPEM, 0o600))
+		require.NoError(tb, os.WriteFile(keyFile, newKeyPEM, 0o600))
+		mtime := time.Now().Add(time.Duration(i+1) * time.Second)
+		_ = os.Chtimes(certFile, mtime, mtime)
+		_ = os.Chtimes(keyFile, mtime, mtime)
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	cancel()
+	wg.Wait()
+
+	// Verify final certificate can be retrieved successfully
+	finalCert, err := reloader.GetCertificate(&tls.ClientHelloInfo{})
+	require.NoError(tb, err)
+	require.NotNil(tb, finalCert)
+	parsed, err := x509.ParseCertificate(finalCert.Certificate[0])
+	require.NoError(tb, err)
+	require.NotEmpty(tb, parsed.Subject.CommonName)
+}
+
+func TestTLSReloader_ConcurrentReload(t *testing.T) {
+	testConcurrentReload(t, 10, 20)
+}
+
+func TestTLSReloader_RotationBetweenReadLockAndWriteLock(t *testing.T) {
+	dir := t.TempDir()
+	certFile := filepath.Join(dir, "tls.crt")
+	keyFile := filepath.Join(dir, "tls.key")
+
+	certPEM1, keyPEM1 := generateTestCertAndKey(t, "cert-v1.example.com")
+	require.NoError(t, os.WriteFile(certFile, certPEM1, 0o600))
+	require.NoError(t, os.WriteFile(keyFile, keyPEM1, 0o600))
+
+	reloader, err := newTLSReloader(certFile, keyFile)
+	require.NoError(t, err)
+
+	// Verify v1 is initially loaded
+	c1, err := reloader.GetCertificate(&tls.ClientHelloInfo{})
+	require.NoError(t, err)
+	p1, err := x509.ParseCertificate(c1.Certificate[0])
+	require.NoError(t, err)
+	require.Equal(t, "cert-v1.example.com", p1.Subject.CommonName)
+
+	// Rotate disk files to v2
+	certPEM2, keyPEM2 := generateTestCertAndKey(t, "cert-v2.example.com")
+	require.NoError(t, os.WriteFile(certFile, certPEM2, 0o600))
+	require.NoError(t, os.WriteFile(keyFile, keyPEM2, 0o600))
+	mtime2 := time.Now().Add(2 * time.Second)
+	require.NoError(t, os.Chtimes(certFile, mtime2, mtime2))
+	require.NoError(t, os.Chtimes(keyFile, mtime2, mtime2))
+
+	// Configure hook to execute AFTER read-lock check (which inspected v2),
+	// but BEFORE write-lock acquisition.
+	reloader.beforeWriteLock = func() {
+		// Simulate another concurrent caller completing reload of v2:
+		pair2, err := tls.LoadX509KeyPair(certFile, keyFile)
+		require.NoError(t, err)
+		s2Cert, err := os.Stat(certFile)
+		require.NoError(t, err)
+		s2Key, err := os.Stat(keyFile)
+		require.NoError(t, err)
+
+		reloader.mu.Lock()
+		reloader.cert = &pair2
+		reloader.certFileInfo = s2Cert
+		reloader.keyFileInfo = s2Key
+		reloader.certModTime = s2Cert.ModTime()
+		reloader.certSize = s2Cert.Size()
+		reloader.keyModTime = s2Key.ModTime()
+		reloader.keySize = s2Key.Size()
+		reloader.mu.Unlock()
+
+		// Now rotate disk files AGAIN to v3:
+		certPEM3, keyPEM3 := generateTestCertAndKey(t, "cert-v3.example.com")
+		require.NoError(t, os.WriteFile(certFile, certPEM3, 0o600))
+		require.NoError(t, os.WriteFile(keyFile, keyPEM3, 0o600))
+		mtime3 := time.Now().Add(4 * time.Second)
+		require.NoError(t, os.Chtimes(certFile, mtime3, mtime3))
+		require.NoError(t, os.Chtimes(keyFile, mtime3, mtime3))
+	}
+
+	// Under the fix, maybeReload re-stats disk under write lock, sees v3 != v2,
+	// and reloads v3. (Without the fix, it would reuse the stale v2 stat, see v2 == v2,
+	// skip reloading, and return v2).
+	cert, err := reloader.GetCertificate(&tls.ClientHelloInfo{})
+	require.NoError(t, err)
+	parsed, err := x509.ParseCertificate(cert.Certificate[0])
+	require.NoError(t, err)
+	require.Equal(t, "cert-v3.example.com", parsed.Subject.CommonName,
+		"reloader must detect rotation to v3 via fresh stat under write lock")
 }

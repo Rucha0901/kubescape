@@ -213,6 +213,10 @@ type tlsReloader struct {
 	certSize     int64
 	keyModTime   time.Time
 	keySize      int64
+
+	// beforeWriteLock is an optional hook for testing to simulate file changes
+	// between the read-lock pre-check and write-lock acquisition.
+	beforeWriteLock func()
 }
 
 // newTLSReloader creates and initializes a tlsReloader.
@@ -316,16 +320,30 @@ func (r *tlsReloader) maybeReload() error {
 		return nil
 	}
 
+	if r.beforeWriteLock != nil {
+		r.beforeWriteLock()
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	// Double check under write lock to avoid redundant loads from concurrent handshakes.
-	if os.SameFile(certStat, r.certFileInfo) &&
-		os.SameFile(keyStat, r.keyFileInfo) &&
-		certStat.ModTime().Equal(r.certModTime) &&
-		certStat.Size() == r.certSize &&
-		keyStat.ModTime().Equal(r.keyModTime) &&
-		keyStat.Size() == r.keySize {
+	freshCertStat, err := os.Stat(r.certFile)
+	if err != nil {
+		return fmt.Errorf("failed to stat cert file: %w", err)
+	}
+
+	freshKeyStat, err := os.Stat(r.keyFile)
+	if err != nil {
+		return fmt.Errorf("failed to stat key file: %w", err)
+	}
+
+	if os.SameFile(freshCertStat, r.certFileInfo) &&
+		os.SameFile(freshKeyStat, r.keyFileInfo) &&
+		freshCertStat.ModTime().Equal(r.certModTime) &&
+		freshCertStat.Size() == r.certSize &&
+		freshKeyStat.ModTime().Equal(r.keyModTime) &&
+		freshKeyStat.Size() == r.keySize {
 		return nil
 	}
 
@@ -335,12 +353,12 @@ func (r *tlsReloader) maybeReload() error {
 	}
 
 	r.cert = &pair
-	r.certFileInfo = certStat
-	r.keyFileInfo = keyStat
-	r.certModTime = certStat.ModTime()
-	r.certSize = certStat.Size()
-	r.keyModTime = keyStat.ModTime()
-	r.keySize = keyStat.Size()
+	r.certFileInfo = freshCertStat
+	r.keyFileInfo = freshKeyStat
+	r.certModTime = freshCertStat.ModTime()
+	r.certSize = freshCertStat.Size()
+	r.keyModTime = freshKeyStat.ModTime()
+	r.keySize = freshKeyStat.Size()
 
 	logger.L().Info("reloaded TLS certificate and key pair",
 		helpers.String("certFile", r.certFile),
