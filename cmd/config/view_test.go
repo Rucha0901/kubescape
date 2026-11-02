@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"os"
 	"testing"
 
@@ -84,5 +85,19 @@ func TestGetViewCmd_RunEPassesFlags(t *testing.T) {
 			assert.Equal(t, tt.wantEmpty, ks.got.IncludeEmpty)
 			assert.Equal(t, os.Stdout, ks.got.Writer)
 		})
+	}
+}
+
+func TestGetViewCmd_HonorsCobraOutputWriter(t *testing.T) {
+	ks := &capturingView{}
+	cmd := getViewCmd(ks)
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetArgs([]string{"--format", "json"})
+
+	err := cmd.Execute()
+	assert.NoError(t, err)
+	if assert.NotNil(t, ks.got) {
+		assert.Equal(t, &buf, ks.got.Writer)
 	}
 }

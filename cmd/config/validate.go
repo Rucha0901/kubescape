@@ -1,8 +1,6 @@
 package config
 
 import (
-	"os"
-
 	"github.com/kubescape/kubescape/v4/core/meta"
 	v1 "github.com/kubescape/kubescape/v4/core/meta/datastructures/v1"
 	"github.com/spf13/cobra"
@@ -20,7 +18,7 @@ func getValidateCmd(ks meta.IKubescape) *cobra.Command {
 			}
 			profile, _ := cmd.Flags().GetString("profile")
 			includeOK, _ := cmd.Flags().GetBool("include-ok")
-			return ks.ValidateCachedConfig(&v1.ValidateConfig{Writer: os.Stdout, Format: outputFormat, Profile: profile, IncludeOK: includeOK})
+			return ks.ValidateCachedConfig(&v1.ValidateConfig{Writer: cmd.OutOrStdout(), Format: outputFormat, Profile: profile, IncludeOK: includeOK})
 		},
 	}
 

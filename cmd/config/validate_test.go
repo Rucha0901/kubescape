@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"testing"
@@ -114,4 +115,18 @@ func TestGetValidateCmd_RunEReturnsValidationError(t *testing.T) {
 	require.EqualError(t, err, "validation failed")
 	require.NotNil(t, ks.got)
 	assert.Equal(t, "json", ks.got.Format)
+}
+
+func TestGetValidateCmd_HonorsCobraOutputWriter(t *testing.T) {
+	ks := &capturingValidate{}
+	cmd := getValidateCmd(ks)
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetArgs([]string{"--format", "json"})
+
+	err := cmd.Execute()
+	require.NoError(t, err)
+	if assert.NotNil(t, ks.got) {
+		assert.Equal(t, &buf, ks.got.Writer)
+	}
 }
