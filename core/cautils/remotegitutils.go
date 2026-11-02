@@ -1,6 +1,7 @@
 package cautils
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -24,12 +25,13 @@ import (
 const gitVisibilityCheckTimeout = 10 * time.Second
 
 var (
-	tmpDirPaths      = make(map[string]string)
-	tmpDirRefs       = make(map[string]int)
-	tmpDirPathsMu    sync.Mutex
-	cloneGroup       singleflight.Group
-	plainClone       = git.PlainClone
-	gitTransportOnce sync.Once
+	tmpDirPaths       = make(map[string]string)
+	tmpDirRefs        = make(map[string]int)
+	tmpDirPathsMu     sync.Mutex
+	cloneGroup        singleflight.Group
+	plainClone        = git.PlainClone
+	plainCloneContext = git.PlainCloneContext
+	gitTransportOnce  sync.Once
 )
 
 // hashRepoURL returns a hex-encoded SHA-256 digest of the given repository URL.
@@ -145,7 +147,7 @@ func getProviderError(gitURL giturl.IGitAPI) error {
 }
 
 // cloneRepo clones a repository to a local temporary directory and returns the directory
-func cloneRepo(gitURL giturl.IGitAPI) (string, error) {
+func cloneRepo(ctx context.Context, gitURL giturl.IGitAPI) (string, error) {
 	// This is a process-wide go-git setting. Configure it once before any
 	// clone starts so different repositories can be cloned concurrently
 	// without racing on transport.UnsupportedCapabilities.
@@ -204,7 +206,7 @@ func cloneRepo(gitURL giturl.IGitAPI) (string, error) {
 		}
 
 		// Actual clone
-		if _, err = plainClone(tmpDir, false, &cloneOpts); err != nil {
+		if _, err = plainCloneContext(ctx, tmpDir, false, &cloneOpts); err != nil {
 			return "", fmt.Errorf("failed to clone %s: %w", gitURL.GetRepoName(), err)
 		}
 
@@ -252,8 +254,8 @@ func ReleaseClonedRepo(path string) error {
 	return nil
 }
 
-// CloneGitRepo clone git repository
-func CloneGitRepo(path *string) (string, error) {
+// CloneGitRepoContext clones a git repository using the provided context
+func CloneGitRepoContext(ctx context.Context, path *string) (string, error) {
 	var clonedDir string
 
 	gitURL, err := giturl.NewGitAPI(*path)
@@ -264,7 +266,7 @@ func CloneGitRepo(path *string) (string, error) {
 	// Clone git repository if needed
 	logger.L().Start("cloning", helpers.String("repository url", gitURL.GetURL().String()))
 
-	clonedDir, err = cloneRepo(gitURL)
+	clonedDir, err = cloneRepo(ctx, gitURL)
 	if err != nil {
 		logger.L().StopError("failed to clone git repo", helpers.String("url", gitURL.GetURL().String()), helpers.Error(err))
 		return "", fmt.Errorf("failed to clone git repo '%s',  %w", gitURL.GetURL().String(), err)
@@ -274,6 +276,11 @@ func CloneGitRepo(path *string) (string, error) {
 	logger.L().StopSuccess("Done accessing remote repo")
 
 	return clonedDir, nil
+}
+
+// CloneGitRepo clone git repository
+func CloneGitRepo(path *string) (string, error) {
+	return CloneGitRepoContext(context.Background(), path)
 }
 
 func GetClonedPath(path string) string {
