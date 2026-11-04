@@ -184,31 +184,30 @@ func validateImagePatchInfo(patchInfo *metav1.PatchInfo) error {
 
 	// If no patched image tag is provided, default to '<image-tag>-patched'
 	if patchInfo.PatchedImageTag == "" {
-
-		taggedName, ok := named.(reference.Tagged)
-		if !ok {
-			return errors.New("unexpected error while parsing image tag")
-		}
-
-		patchInfo.ImageTag = taggedName.Tag()
-
-		if patchInfo.ImageTag == "" {
+		if taggedName, ok := named.(reference.Tagged); ok {
+			patchInfo.ImageTag = taggedName.Tag()
+			if patchInfo.ImageTag == "" {
+				logger.L().Warning("No tag provided, defaulting to 'patched'")
+				patchInfo.PatchedImageTag = "patched"
+			} else {
+				patchInfo.PatchedImageTag = fmt.Sprintf("%s-%s", patchInfo.ImageTag, "patched")
+			}
+		} else if _, ok := named.(reference.Digested); ok {
 			logger.L().Warning("No tag provided, defaulting to 'patched'")
 			patchInfo.PatchedImageTag = "patched"
 		} else {
-			patchInfo.PatchedImageTag = fmt.Sprintf("%s-%s", patchInfo.ImageTag, "patched")
+			return errors.New("unexpected error while parsing image tag")
 		}
-
 	}
 
 	// Extract the "image" name from the canonical Image URL
 	// If it's an official docker image, we store just the "image-name". Else if a docker repo then we store as "repo/image". Else complete URL
 	ref, _ := reference.ParseNormalizedNamed(patchInfo.Image)
 	imageName := named.Name()
-	if strings.Contains(imageName, "docker.io/library/") {
+	if strings.HasPrefix(imageName, "docker.io/library/") {
 		imageName = reference.Path(ref)
 		imageName = imageName[strings.LastIndex(imageName, "/")+1:]
-	} else if strings.Contains(imageName, "docker.io/") {
+	} else if strings.HasPrefix(imageName, "docker.io/") {
 		imageName = reference.Path(ref)
 	}
 	patchInfo.ImageName = imageName

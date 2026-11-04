@@ -351,7 +351,7 @@ func Test_validateImagePatchInfo_ExplicitTagStillCapturesSourceTag(t *testing.T)
 	assert.Equal(t, "my-patched", patchInfo.PatchedImageTag)
 }
 
-func Test_validateImagePatchInfo_DigestOnlyReturnsError(t *testing.T) {
+func Test_validateImagePatchInfo_DigestOnlyDefaultsPatchedTag(t *testing.T) {
 	patchInfo := &metav1.PatchInfo{
 		Image:      "nginx@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		OutputMode: "docker",
@@ -359,8 +359,25 @@ func Test_validateImagePatchInfo_DigestOnlyReturnsError(t *testing.T) {
 
 	err := validateImagePatchInfo(patchInfo)
 
-	assert.Error(t, err)
-	assert.Equal(t, "unexpected error while parsing image tag", err.Error())
+	assert.NoError(t, err)
+	assert.Equal(t, "docker.io/library/nginx@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", patchInfo.Image)
+	assert.Empty(t, patchInfo.ImageTag, "digest-pinned reference carries no source tag")
+	assert.Equal(t, "patched", patchInfo.PatchedImageTag)
+	assert.Equal(t, "nginx", patchInfo.ImageName)
+}
+
+func Test_validateImagePatchInfo_ThirdPartyRegistryWithDockerPrefix(t *testing.T) {
+	patchInfo := &metav1.PatchInfo{
+		Image:      "quay.io/docker.io/library/app:1.0",
+		OutputMode: "docker",
+	}
+
+	err := validateImagePatchInfo(patchInfo)
+
+	assert.NoError(t, err)
+	assert.Equal(t, "quay.io/docker.io/library/app", patchInfo.ImageName)
+	assert.Equal(t, "1.0", patchInfo.ImageTag)
+	assert.Equal(t, "1.0-patched", patchInfo.PatchedImageTag)
 }
 
 func Test_validateImagePatchInfo_OutputModeValidation(t *testing.T) {

@@ -189,6 +189,9 @@ func (ks *Kubescape) Patch(patchInfo *ksmetav1.PatchInfo, scanInfo *cautils.Scan
 // the prefix docker's resolver and grype's docker-provider expect; without it,
 // the patched image is unresolvable locally — see kubescape/kubescape#2189.
 func buildPatchedImageName(image, patchedTag string) (string, error) {
+	if patchedTag == "" {
+		return "", errors.New("patched image tag cannot be empty")
+	}
 	ref, err := reference.ParseNormalizedNamed(image)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse image reference %q: %w", image, err)

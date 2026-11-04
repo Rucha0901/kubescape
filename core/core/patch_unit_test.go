@@ -175,3 +175,63 @@ func TestCopaPatchReturnsEarlyErrors(t *testing.T) {
 	)
 	require.ErrorContains(t, err, "invalid character")
 }
+
+func TestBuildPatchedImageName_DigestPinned(t *testing.T) {
+	tests := []struct {
+		name       string
+		image      string
+		patchedTag string
+		want       string
+		wantErr    string
+	}{
+		{
+			name:       "tagged image",
+			image:      "nginx:1.22",
+			patchedTag: "1.22-patched",
+			want:       "docker.io/library/nginx:1.22-patched",
+		},
+		{
+			name:       "digest-pinned image",
+			image:      "nginx@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+			patchedTag: "patched",
+			want:       "docker.io/library/nginx:patched",
+		},
+		{
+			name:       "tagged and digest-pinned image",
+			image:      "nginx:1.22@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+			patchedTag: "patched",
+			want:       "docker.io/library/nginx:patched",
+		},
+		{
+			name:       "custom registry with digest",
+			image:      "quay.io/myorg/myapp@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+			patchedTag: "patched",
+			want:       "quay.io/myorg/myapp:patched",
+		},
+		{
+			name:       "empty patched tag fails",
+			image:      "nginx:1.22",
+			patchedTag: "",
+			wantErr:    "patched image tag cannot be empty",
+		},
+		{
+			name:       "invalid image reference",
+			image:      "://invalid",
+			patchedTag: "patched",
+			wantErr:    "failed to parse image reference",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := buildPatchedImageName(tc.image, tc.patchedTag)
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, tc.want, got)
+			}
+		})
+	}
+}
